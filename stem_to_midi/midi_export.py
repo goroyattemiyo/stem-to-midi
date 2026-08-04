@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from io import BytesIO
 
 import mido
@@ -58,7 +59,8 @@ def render_raw_midi(
 
     note_track = mido.MidiTrack()
     midi_file.tracks.append(note_track)
-    note_track.append(mido.MetaMessage("track_name", name=track_name, time=0))
+    safe_track_name = _safe_midi_text(track_name, fallback="Raw MIDI")
+    note_track.append(mido.MetaMessage("track_name", name=safe_track_name, time=0))
     note_track.append(mido.Message("program_change", program=program, time=0))
 
     absolute_events: list[tuple[int, int, mido.Message]] = []
@@ -103,6 +105,15 @@ def render_raw_midi(
     buffer = BytesIO()
     midi_file.save(file=buffer)
     return buffer.getvalue()
+
+
+def _safe_midi_text(value: str, *, fallback: str) -> str:
+    """Return conservative ASCII metadata for broad MIDI/DAW compatibility."""
+
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_value = normalized.encode("ascii", errors="ignore").decode("ascii")
+    compact = " ".join(ascii_value.split())
+    return compact[:127] or fallback
 
 
 def _seconds_to_ticks(seconds: float, ticks_per_beat: int, tempo: int) -> int:
