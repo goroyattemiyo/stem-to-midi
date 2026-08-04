@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
+from itertools import pairwise
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Iterable, Sequence
 
 import librosa
 import numpy as np
@@ -325,7 +326,7 @@ def count_large_pitch_jumps(
     ordered = sorted(notes, key=lambda note: (note.start_sec, note.end_sec))
     return sum(
         1
-        for previous, current in zip(ordered, ordered[1:])
+        for previous, current in pairwise(ordered)
         if current.start_sec - previous.end_sec <= maximum_gap_sec
         and abs(current.pitch - previous.pitch) >= threshold_semitones
     )
