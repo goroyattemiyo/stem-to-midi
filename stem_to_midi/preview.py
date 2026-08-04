@@ -25,37 +25,75 @@ def render_click_preview(
     beat_times_sec: tuple[float, ...] | list[float],
     start_sec: float,
     duration_sec: float,
-    click_gain: float = 0.45,
+    click_gain: float = 0.38,
+    accent_times_sec: tuple[float, ...] | list[float] = (),
+    accent_gain: float = 0.62,
 ) -> bytes:
-    """Mix clicks over a selected audio segment and return WAV bytes."""
+    """Mix beat clicks and optional bar accents over one audio segment.
+
+    Beat and accent times are absolute source times. They are shifted by the
+    exact segment start before rendering, so a beat at ``start_sec`` lands at
+    sample zero of the returned preview.
+    """
 
     if click_gain < 0:
         raise ValueError("Click gain must be non-negative")
+    if accent_gain < 0:
+        raise ValueError("Accent gain must be non-negative")
 
     segment = _slice_audio(audio, sample_rate, start_sec, duration_sec)
     end_sec = start_sec + len(segment) / sample_rate
-    relative_beats = np.asarray(
-        [
-            float(beat) - start_sec
-            for beat in beat_times_sec
-            if start_sec <= float(beat) < end_sec
-        ],
-        dtype=float,
+    tolerance = 0.5 / sample_rate
+    relative_beats = _relative_times(
+        beat_times_sec,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        tolerance=tolerance,
+    )
+    relative_accents = _relative_times(
+        accent_times_sec,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        tolerance=tolerance,
     )
 
     clicks = librosa.clicks(
         times=relative_beats,
         sr=sample_rate,
-        click_freq=1200.0,
+        click_freq=1_100.0,
         click_duration=0.04,
         length=len(segment),
     ).astype(np.float32)
+    accents = librosa.clicks(
+        times=relative_accents,
+        sr=sample_rate,
+        click_freq=1_800.0,
+        click_duration=0.06,
+        length=len(segment),
+    ).astype(np.float32)
 
-    mixed = segment + clicks * float(click_gain)
+    mixed = segment + clicks * float(click_gain) + accents * float(accent_gain)
     peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
     if peak > 0.98:
         mixed = mixed * (0.98 / peak)
     return _encode_wav(mixed, sample_rate)
+
+
+def _relative_times(
+    absolute_times_sec: tuple[float, ...] | list[float],
+    *,
+    start_sec: float,
+    end_sec: float,
+    tolerance: float,
+) -> np.ndarray:
+    return np.asarray(
+        [
+            max(float(value) - start_sec, 0.0)
+            for value in absolute_times_sec
+            if start_sec - tolerance <= float(value) < end_sec
+        ],
+        dtype=float,
+    )
 
 
 def _slice_audio(
