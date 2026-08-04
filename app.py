@@ -12,11 +12,14 @@ from stem_to_midi.preview import render_click_preview, render_wav_segment
 from stem_to_midi.tempo import (
     TempoAnalysis,
     analyze_tempo,
+    calculate_grid_diagnostics,
     generate_fixed_beat_times,
     load_wav_bytes,
 )
 
 st.set_page_config(page_title="Stem to MIDI — Tempo Lab", page_icon="🎵", layout="wide")
+
+_GRID_MULTIPLIERS = (1, 2)
 
 
 @st.cache_data(show_spinner=False)
@@ -54,21 +57,41 @@ def main() -> None:
     metrics[3].metric("検出拍数", len(analysis.detected_beat_times_sec))
 
     st.subheader("テンポ補正")
-    bpm_column, bpm_buttons = st.columns([2, 1])
+    bpm_column, multiplier_column, bpm_buttons = st.columns([2, 2, 1])
     with bpm_column:
         st.number_input(
-            "BPM",
+            "体感テンポ（BPM）",
             min_value=20.0,
             max_value=400.0,
             step=0.1,
             format="%.2f",
-            key="corrected_bpm",
+            key="felt_bpm",
+        )
+    with multiplier_column:
+        st.selectbox(
+            "内部グリッド倍率",
+            options=_GRID_MULTIPLIERS,
+            format_func=lambda value: f"×{value}",
+            key="grid_multiplier",
+            help="MIDI量子化用の細かさです。ハーフタイム曲では×2が便利です。",
         )
     with bpm_buttons:
-        st.write("候補補正")
+        st.write("体感補正")
         left, right = st.columns(2)
-        left.button("÷2", use_container_width=True, on_click=_scale_bpm, args=(0.5,))
-        right.button("×2", use_container_width=True, on_click=_scale_bpm, args=(2.0,))
+        left.button(
+            "÷2",
+            use_container_width=True,
+            on_click=_scale_felt_bpm,
+            args=(0.5,),
+            help="内部グリッドをなるべく維持したまま体感テンポを半分にします。",
+        )
+        right.button(
+            "×2",
+            use_container_width=True,
+            on_click=_scale_felt_bpm,
+            args=(2.0,),
+            help="内部グリッドをなるべく維持したまま体感テンポを倍にします。",
+        )
 
     offset_column, offset_buttons = st.columns([2, 2])
     with offset_column:
@@ -96,13 +119,55 @@ def main() -> None:
                 args=(delta, analysis.duration_sec),
             )
 
-    adjusted_beats = generate_fixed_beat_times(
-        float(st.session_state.corrected_bpm),
-        float(st.session_state.first_beat_sec),
+    felt_bpm = float(st.session_state.felt_bpm)
+    grid_multiplier = int(st.session_state.grid_multiplier)
+    grid_bpm = felt_bpm * grid_multiplier
+    first_beat_sec = float(st.session_state.first_beat_sec)
+
+    felt_beats = generate_fixed_beat_times(
+        felt_bpm,
+        first_beat_sec,
         analysis.duration_sec,
+    )
+    grid_beats = generate_fixed_beat_times(
+        grid_bpm,
+        first_beat_sec,
+        analysis.duration_sec,
+    )
+    diagnostics = calculate_grid_diagnostics(
+        duration_sec=analysis.duration_sec,
+        first_beat_sec=first_beat_sec,
+        detected_beats_sec=analysis.detected_beat_times_sec,
+    )
+
+    tempo_metrics = st.columns(4)
+    tempo_metrics[0].metric("体感テンポ", f"{felt_bpm:.2f} BPM")
+    tempo_metrics[1].metric(
+        "内部グリッド",
+        f"{grid_bpm:.2f} BPM",
+        delta=f"×{grid_multiplier}",
+        delta_color="off",
+    )
+    tempo_metrics[2].metric(
+        "先頭拍誤差",
+        _format_offset_ms(diagnostics.first_beat_offset_sec),
+    )
+    tempo_metrics[3].metric(
+        "検出終了後の余白",
+        f"{diagnostics.detection_tail_sec:.2f} 秒",
+    )
+    st.caption(
+        "先頭拍誤差は、補正した先頭拍と最寄りの自動検出拍との差です。"
+        "内部グリッドは将来のMIDI量子化に使います。"
     )
 
     st.subheader("確認")
+    click_mode = st.radio(
+        "クリック音",
+        options=("体感拍", "内部グリッド"),
+        horizontal=True,
+        help="体感拍で音楽的な脈を確認し、内部グリッドで量子化の細かさを確認します。",
+    )
     preview_duration = st.select_slider(
         "確認区間の長さ",
         options=[5, 10, 15, 30],
@@ -133,7 +198,8 @@ def main() -> None:
         start_sec=preview_start,
         duration_sec=float(preview_duration),
         detected_beats_sec=analysis.detected_beat_times_sec,
-        adjusted_beats_sec=adjusted_beats,
+        felt_beats_sec=felt_beats,
+        grid_beats_sec=grid_beats,
     )
     st.pyplot(figure, use_container_width=True)
     plt.close(figure)
@@ -144,10 +210,11 @@ def main() -> None:
         preview_start,
         float(preview_duration),
     )
+    preview_beats = felt_beats if click_mode == "体感拍" else grid_beats
     click_preview = render_click_preview(
         audio,
         sample_rate,
-        adjusted_beats,
+        preview_beats,
         preview_start,
         float(preview_duration),
     )
@@ -157,27 +224,41 @@ def main() -> None:
         st.markdown("**元音源**")
         st.audio(original_preview, format="audio/wav")
     with click_column:
-        st.markdown("**クリック付き**")
+        st.markdown(f"**クリック付き（{click_mode}）**")
         st.audio(click_preview, format="audio/wav")
 
     payload = {
+        "schema_version": 2,
         "source_file": uploaded.name,
         "source_sha256": source_digest,
         "duration_sec": round(analysis.duration_sec, 6),
         "sample_rate": sample_rate,
         "tempo_mode": "fixed",
         "detected_bpm": round(analysis.detected_bpm, 6),
-        "corrected_bpm": round(float(st.session_state.corrected_bpm), 6),
+        "felt_bpm": round(felt_bpm, 6),
+        "grid_multiplier": grid_multiplier,
+        "grid_bpm": round(grid_bpm, 6),
+        "corrected_bpm": round(felt_bpm, 6),
         "detected_first_beat_sec": (
             round(analysis.detected_beat_times_sec[0], 6)
             if analysis.detected_beat_times_sec
             else None
         ),
-        "corrected_first_beat_sec": round(float(st.session_state.first_beat_sec), 6),
+        "nearest_detected_beat_sec": _round_optional(
+            diagnostics.nearest_detected_beat_sec
+        ),
+        "corrected_first_beat_sec": round(first_beat_sec, 6),
+        "first_beat_offset_ms": _round_optional(
+            diagnostics.first_beat_offset_sec,
+            multiplier=1_000.0,
+        ),
+        "detection_tail_sec": round(diagnostics.detection_tail_sec, 6),
         "detected_beat_times_sec": [
             round(value, 6) for value in analysis.detected_beat_times_sec
         ],
-        "corrected_beat_times_sec": [round(value, 6) for value in adjusted_beats],
+        "felt_beat_times_sec": [round(value, 6) for value in felt_beats],
+        "grid_beat_times_sec": [round(value, 6) for value in grid_beats],
+        "corrected_beat_times_sec": [round(value, 6) for value in felt_beats],
     }
     output_name = f"{Path(uploaded.name).stem}.tempo.json"
     st.download_button(
@@ -189,30 +270,80 @@ def main() -> None:
     )
 
     st.caption(
-        "この初期版は固定テンポの調整に限定しています。Follow tempo changesのテンポマップ編集は次段階です。"
+        "この版は固定テンポの調整に限定しています。"
+        "Follow tempo changesのテンポマップ編集は次段階です。"
     )
 
 
 def _initialize_state(source_digest: str, analysis: TempoAnalysis) -> None:
+    fallback_bpm = analysis.detected_bpm if analysis.detected_bpm > 0 else 120.0
+    first_detected = (
+        analysis.detected_beat_times_sec[0] if analysis.detected_beat_times_sec else 0.0
+    )
+
     if st.session_state.get("source_digest") == source_digest:
+        if "felt_bpm" not in st.session_state:
+            legacy_bpm = float(st.session_state.get("corrected_bpm", fallback_bpm))
+            st.session_state.felt_bpm = legacy_bpm
+            st.session_state.grid_multiplier = _infer_grid_multiplier(
+                felt_bpm=legacy_bpm,
+                detected_bpm=analysis.detected_bpm,
+            )
+        if "grid_multiplier" not in st.session_state:
+            st.session_state.grid_multiplier = 1
+        if "first_beat_sec" not in st.session_state:
+            st.session_state.first_beat_sec = float(first_detected)
+        if "preview_start" not in st.session_state:
+            st.session_state.preview_start = 0.0
         return
 
-    fallback_bpm = analysis.detected_bpm if analysis.detected_bpm > 0 else 120.0
-    first_beat = analysis.detected_beat_times_sec[0] if analysis.detected_beat_times_sec else 0.0
     st.session_state.source_digest = source_digest
-    st.session_state.corrected_bpm = float(fallback_bpm)
-    st.session_state.first_beat_sec = float(first_beat)
+    st.session_state.felt_bpm = float(fallback_bpm)
+    st.session_state.grid_multiplier = 1
+    st.session_state.first_beat_sec = float(first_detected)
     st.session_state.preview_start = 0.0
 
 
-def _scale_bpm(factor: float) -> None:
-    current = float(st.session_state.corrected_bpm)
-    st.session_state.corrected_bpm = min(max(current * factor, 20.0), 400.0)
+def _scale_felt_bpm(factor: float) -> None:
+    current_felt = float(st.session_state.felt_bpm)
+    current_multiplier = int(st.session_state.grid_multiplier)
+    current_grid = current_felt * current_multiplier
+    new_felt = min(max(current_felt * factor, 20.0), 400.0)
+
+    st.session_state.felt_bpm = new_felt
+    st.session_state.grid_multiplier = min(
+        _GRID_MULTIPLIERS,
+        key=lambda multiplier: abs(new_felt * multiplier - current_grid),
+    )
 
 
 def _shift_first_beat(delta_sec: float, duration_sec: float) -> None:
     current = float(st.session_state.first_beat_sec)
     st.session_state.first_beat_sec = min(max(current + delta_sec, 0.0), duration_sec)
+
+
+def _infer_grid_multiplier(felt_bpm: float, detected_bpm: float) -> int:
+    if felt_bpm <= 0 or detected_bpm <= 0:
+        return 1
+    return min(
+        _GRID_MULTIPLIERS,
+        key=lambda multiplier: abs(felt_bpm * multiplier - detected_bpm),
+    )
+
+
+def _format_offset_ms(offset_sec: float | None) -> str:
+    if offset_sec is None:
+        return "—"
+    return f"{offset_sec * 1_000:+.0f} ms"
+
+
+def _round_optional(
+    value: float | None,
+    multiplier: float = 1.0,
+) -> float | None:
+    if value is None:
+        return None
+    return round(value * multiplier, 6)
 
 
 def _format_duration(seconds: float) -> str:
