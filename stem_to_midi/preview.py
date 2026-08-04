@@ -72,8 +72,8 @@ def _slice_audio(
     if duration_sec <= 0:
         raise ValueError("Preview duration must be positive")
 
-    start_sample = min(int(round(start_sec * sample_rate)), len(signal))
-    end_sample = min(int(round((start_sec + duration_sec) * sample_rate)), len(signal))
+    start_sample = min(round(start_sec * sample_rate), len(signal))
+    end_sample = min(round((start_sec + duration_sec) * sample_rate), len(signal))
     return np.asarray(signal[start_sample:end_sample], dtype=np.float32)
 
 
