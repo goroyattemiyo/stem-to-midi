@@ -122,7 +122,6 @@ def main() -> None:
         key="accuracy_preset_key",
         on_change=_apply_preset,
     )
-    preset = get_transcription_preset(preset_key)
 
     range_column, threshold_column, cleanup_column = st.columns(3)
     with range_column:
