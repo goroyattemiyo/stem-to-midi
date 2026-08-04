@@ -106,4 +106,4 @@ def render_raw_midi(
 
 
 def _seconds_to_ticks(seconds: float, ticks_per_beat: int, tempo: int) -> int:
-    return max(int(round(mido.second2tick(seconds, ticks_per_beat, tempo))), 0)
+    return max(round(mido.second2tick(seconds, ticks_per_beat, tempo)), 0)
