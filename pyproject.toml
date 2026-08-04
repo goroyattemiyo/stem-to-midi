@@ -18,6 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+accuracy = [
+  "basic-pitch>=0.4,<0.5",
+]
 dev = [
   "pytest>=8,<10",
   "ruff>=0.12,<1",
