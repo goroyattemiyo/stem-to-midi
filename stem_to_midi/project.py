@@ -47,7 +47,7 @@ def parse_tempo_project(data: bytes | str) -> TempoProjectSettings:
         raise ValueError(f"Invalid JSON: line {exc.lineno}, column {exc.colno}") from exc
 
     if not isinstance(payload, dict):
-        raise ValueError("Tempo JSON must contain a JSON object")
+        raise TypeError("Tempo JSON must contain a JSON object")
 
     schema_version = _read_schema_version(payload)
     if schema_version == 1:
@@ -140,7 +140,7 @@ def _decode_json_text(data: bytes | str) -> str:
 def _read_schema_version(payload: dict[str, object]) -> int:
     raw = payload.get("schema_version", 1)
     if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ValueError("schema_version must be an integer")
+        raise TypeError("schema_version must be an integer")
     return raw
 
 
@@ -189,7 +189,7 @@ def _optional_number(payload: dict[str, object], key: str) -> float | None:
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise ValueError(f"{key} must be numeric")
+        raise TypeError(f"{key} must be numeric")
     value = float(raw)
     if not math.isfinite(value):
         raise ValueError(f"{key} must be finite")
@@ -201,7 +201,7 @@ def _optional_integer(payload: dict[str, object], key: str) -> int | None:
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ValueError(f"{key} must be an integer")
+        raise TypeError(f"{key} must be an integer")
     return raw
 
 
