@@ -10,10 +10,10 @@ import streamlit as st
 from stem_to_midi.plotting import plot_waveform_with_beats
 from stem_to_midi.preview import render_click_preview, render_wav_segment
 from stem_to_midi.tempo import (
+    TempoAnalysis,
     analyze_tempo,
     generate_fixed_beat_times,
     load_wav_bytes,
-    TempoAnalysis,
 )
 
 
