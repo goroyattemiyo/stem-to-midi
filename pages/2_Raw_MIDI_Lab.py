@@ -14,6 +14,14 @@ from stem_to_midi.alignment import (
     snap_time_to_grid,
     start_for_bar,
 )
+from stem_to_midi.analysis_plan import (
+    AnalysisExtent,
+    build_output_stem,
+    calculate_analysis_extent,
+    get_transcription_preset,
+    suggest_transcription_preset,
+    transcription_presets,
+)
 from stem_to_midi.midi_export import render_raw_midi
 from stem_to_midi.preview import render_click_preview, render_wav_segment
 from stem_to_midi.project import TempoProjectSettings, parse_tempo_project
@@ -25,9 +33,10 @@ from stem_to_midi.transcription import (
 )
 from stem_to_midi.transcription_plot import plot_transcription
 
-st.set_page_config(page_title="Stem to MIDI — Raw MIDI Lab", page_icon="🎸", layout="wide")
+st.set_page_config(page_title="Stem to MIDI — Raw MIDI Lab", page_icon="🎙️", layout="wide")
 
 _START_MODES = ("先頭拍", "小節頭", "自由位置")
+_RANGE_MODES = ("30秒で検証", "60秒で検証", "全曲")
 
 
 @st.cache_data(show_spinner=False)
@@ -67,16 +76,15 @@ def run_transcription(
 
 
 def main() -> None:
-    st.title("Raw MIDI Lab — Bass spike")
+    st.title("Raw MIDI Lab — 単音ステム採譜")
     st.caption(
-        "ベースなど単音中心のステムをpYINで追跡し、無量子化のRaw MIDIとして出力します。"
+        "ベース、ボーカル、単音リードをpYINで追跡し、無量子化のRaw MIDIとして出力します。"
     )
     st.info(
-        "最初は30秒区間で精度を確認してください。良ければ全曲へ広げます。"
-        "この段階では音符を拍グリッドへ丸めません。"
+        "30秒／60秒は設定検証用です。曲全体のMIDIが必要なときは、必ず「全曲」を選んでください。"
     )
 
-    wav_file = st.file_uploader("音高ステムWAV（まずはBass推奨）", type=["wav"])
+    wav_file = st.file_uploader("音高ステムWAV", type=["wav"])
     tempo_file = st.file_uploader("Tempo Labのtempo.json", type=["json"])
     if wav_file is None or tempo_file is None:
         st.stop()
@@ -94,56 +102,69 @@ def main() -> None:
         st.error(f"WAVを読み込めませんでした: {exc}")
         st.stop()
 
-    duration_sec = len(audio) / sample_rate
-    _show_source_summary(wav_file.name, duration_sec, sample_rate, settings)
+    source_duration_sec = len(audio) / sample_rate
+    _show_source_summary(wav_file.name, source_duration_sec, sample_rate, settings)
+    _initialize_preset_state(wav_file.name, wav_bytes)
 
     st.subheader("検出設定")
+    preset_options = tuple(preset.key for preset in transcription_presets())
+    selected_preset_key = st.selectbox(
+        "楽器プリセット",
+        options=preset_options,
+        format_func=lambda key: get_transcription_preset(key).label,
+        key="raw_midi_preset_key",
+        on_change=_apply_selected_preset,
+        help="ファイル名にLead、Vocal、Voiceなどが含まれる場合はボーカル設定を初期選択します。",
+    )
+    preset = get_transcription_preset(selected_preset_key)
+    st.caption(preset.description + " プリセット適用後も各値を手動調整できます。")
+
     range_column, confidence_column, cleanup_column = st.columns(3)
     with range_column:
-        min_options = list(range(20, 61))
-        max_options = list(range(36, 85))
+        min_options = list(range(20, 73))
+        max_options = list(range(36, 97))
         min_midi = st.selectbox(
             "最低音",
             options=min_options,
-            index=min_options.index(28),
             format_func=_midi_note_name,
+            key="raw_midi_min_midi",
         )
         max_midi = st.selectbox(
             "最高音",
             options=max_options,
-            index=max_options.index(60),
             format_func=_midi_note_name,
+            key="raw_midi_max_midi",
         )
     with confidence_column:
         voicing_threshold = st.slider(
             "有声音の確信度",
             min_value=0.30,
             max_value=0.95,
-            value=0.60,
             step=0.05,
-            help="高くすると誤検出は減りますが、弱い音を落としやすくなります。",
+            key="raw_midi_voicing_threshold",
+            help="低くすると弱い音を拾いやすくなりますが、分離ノイズも増えます。",
         )
         onset_split = st.checkbox(
             "同じ音程の再アタックを分割",
-            value=True,
-            help="同じ音を弾き直した箇所を、オンセット検出で別音符にします。",
+            key="raw_midi_onset_split",
+            help="ベースでは有効、ビブラートを含むボーカルではOFFを初期値にしています。",
         )
     with cleanup_column:
         min_note_ms = st.slider(
             "最短音符",
             min_value=40,
             max_value=300,
-            value=90,
             step=10,
             format="%d ms",
+            key="raw_midi_min_note_ms",
         )
         max_gap_ms = st.slider(
             "同音内で埋める無音",
             min_value=0,
             max_value=200,
-            value=60,
             step=10,
             format="%d ms",
+            key="raw_midi_max_gap_ms",
         )
 
     if min_midi >= max_midi:
@@ -153,159 +174,60 @@ def main() -> None:
     st.subheader("解析範囲と同期確認")
     range_mode = st.radio(
         "処理量",
-        options=("30秒で検証", "60秒で検証", "全曲"),
+        options=_RANGE_MODES,
         horizontal=True,
+        key="raw_midi_range_mode",
     )
-    start_description = "音源先頭"
-    if range_mode == "全曲":
-        analysis_start = 0.0
-        analysis_duration: float | None = None
-        st.caption(
-            f"全曲 {_format_duration(duration_sec)} を解析します。数分かかる場合があります。"
-        )
-        st.info(
-            "全曲モードはイントロも保持するため0秒から解析します。"
-            "同期確認は30秒または60秒モードで行ってください。"
-        )
-    else:
-        selected_duration = 30.0 if range_mode == "30秒で検証" else 60.0
-        selected_duration = min(selected_duration, duration_sec)
-        start_mode = st.radio(
-            "開始位置の合わせ方",
-            options=_START_MODES,
-            horizontal=True,
-            key="raw_midi_start_mode",
-            help=(
-                "先頭拍と小節頭では、解析・波形・音声・クリックが同じ絶対時刻から始まります。"
-            ),
-        )
-        max_start = max(duration_sec - selected_duration, 0.0)
-        if start_mode == "先頭拍":
-            analysis_start = min(settings.first_beat_sec, duration_sec)
-            st.session_state.raw_midi_start = analysis_start
-            start_description = "先頭拍（1小節目）"
-        elif start_mode == "小節頭":
-            max_bar = maximum_bar_number(
-                first_beat_sec=settings.first_beat_sec,
-                bpm=settings.felt_bpm,
-                duration_sec=duration_sec,
-                clip_duration_sec=selected_duration,
-            )
-            current_bar = min(
-                max(int(st.session_state.get("raw_midi_bar_number", 1)), 1),
-                max_bar,
-            )
-            st.session_state.raw_midi_bar_number = current_bar
-            bar_number = st.number_input(
-                "開始小節",
-                min_value=1,
-                max_value=max_bar,
-                step=1,
-                key="raw_midi_bar_number",
-            )
-            analysis_start = start_for_bar(
-                settings.first_beat_sec,
-                settings.felt_bpm,
-                int(bar_number),
-            )
-            st.session_state.raw_midi_start = analysis_start
-            start_description = f"{int(bar_number)}小節目の頭"
-        else:
-            current_start = min(
-                max(float(st.session_state.get("raw_midi_start", settings.first_beat_sec)), 0.0),
-                float(max_start),
-            )
-            st.session_state.raw_midi_start = current_start
-            analysis_start = st.slider(
-                "自由な開始位置",
-                min_value=0.0,
-                max_value=float(max_start),
-                step=0.01,
-                format="%.3f 秒",
-                key="raw_midi_start",
-            )
-            snap_columns = st.columns(2)
-            snap_columns[0].button(
-                "最寄りの体感拍へスナップ",
-                use_container_width=True,
-                on_click=_snap_raw_start,
-                args=(settings.first_beat_sec, settings.felt_bpm, 1, max_start),
-            )
-            snap_columns[1].button(
-                "最寄りの小節頭へスナップ",
-                use_container_width=True,
-                on_click=_snap_raw_start,
-                args=(settings.first_beat_sec, settings.felt_bpm, 4, max_start),
-            )
-            start_description = "自由位置"
+    analysis_start, requested_duration, start_description = _select_analysis_range(
+        range_mode=range_mode,
+        source_duration_sec=source_duration_sec,
+        settings=settings,
+    )
+    extent = calculate_analysis_extent(
+        source_duration_sec=source_duration_sec,
+        start_sec=analysis_start,
+        requested_duration_sec=requested_duration,
+    )
+    if extent.duration_sec <= 0.0:
+        st.error("選択した開始位置より後に解析できる音声がありません。")
+        st.stop()
 
-        analysis_duration = min(selected_duration, max(duration_sec - analysis_start, 0.0))
-        if analysis_duration <= 0.0:
-            st.error("選択した開始位置より後に解析できる音声がありません。")
-            st.stop()
+    output_stem = build_output_stem(wav_file.name, extent)
+    _show_extent_summary(extent, start_description, output_stem)
 
-        nearest_beat = snap_time_to_grid(
-            analysis_start,
-            first_beat_sec=settings.first_beat_sec,
-            bpm=settings.felt_bpm,
-        )
-        phase_offset_ms = (analysis_start - nearest_beat) * 1_000.0
-        summary_columns = st.columns(3)
-        summary_columns[0].metric("解析・確認開始", f"{analysis_start:.3f} 秒")
-        summary_columns[1].metric("開始基準", start_description)
-        summary_columns[2].metric("体感拍との位相差", f"{phase_offset_ms:+.0f} ms")
-
-        grid_beats = generate_fixed_beat_times(
-            settings.grid_bpm,
-            settings.first_beat_sec,
-            duration_sec,
-        )
-        bar_starts = generate_bar_times(
-            settings.first_beat_sec,
-            settings.felt_bpm,
-            duration_sec,
-        )
-        original_preview = render_wav_segment(
-            audio,
-            sample_rate,
-            analysis_start,
-            analysis_duration,
-        )
-        click_preview = render_click_preview(
-            audio,
-            sample_rate,
-            grid_beats,
-            analysis_start,
-            analysis_duration,
-            accent_times_sec=bar_starts,
-        )
-        original_column, click_column = st.columns(2)
-        with original_column:
-            st.markdown("**解析対象の元音源**")
-            st.audio(original_preview, format="audio/wav")
-        with click_column:
-            st.markdown("**同じ開始位置のクリック付き音源**")
-            st.audio(click_preview, format="audio/wav")
-        st.caption(
-            "高いクリックは小節頭、低いクリックは内部グリッドです。"
-            "先頭拍／小節頭モードでは再生開始サンプルに高いクリックが置かれます。"
+    analysis_duration = None if extent.is_full_track else extent.duration_sec
+    if not extent.is_full_track:
+        _show_sync_preview(
+            audio=audio,
+            sample_rate=sample_rate,
+            extent=extent,
+            source_duration_sec=source_duration_sec,
+            settings=settings,
         )
 
     request_key = _request_key(
         wav_bytes=wav_bytes,
         tempo_bytes=tempo_file.getvalue(),
+        preset_key=selected_preset_key,
+        midi_program=preset.midi_program,
         min_midi=min_midi,
         max_midi=max_midi,
         voicing_threshold=voicing_threshold,
         min_note_ms=float(min_note_ms),
         max_gap_ms=float(max_gap_ms),
         onset_split=onset_split,
-        start_sec=analysis_start,
+        start_sec=extent.start_sec,
         duration_sec=analysis_duration,
     )
 
-    if st.button("Raw MIDIを生成", type="primary", use_container_width=True):
-        with st.spinner("pYINで音高を追跡しています…"):
+    button_label = "全曲のRaw MIDIを生成" if extent.is_full_track else "検証区間のRaw MIDIを生成"
+    if st.button(button_label, type="primary", use_container_width=True):
+        spinner_text = (
+            f"全曲 {_format_duration(source_duration_sec)} をpYINで解析しています…"
+            if extent.is_full_track
+            else "選択区間をpYINで解析しています…"
+        )
+        with st.spinner(spinner_text):
             try:
                 result = run_transcription(
                     wav_bytes,
@@ -315,7 +237,7 @@ def main() -> None:
                     min_note_ms=float(min_note_ms),
                     max_gap_ms=float(max_gap_ms),
                     onset_split=onset_split,
-                    start_sec=analysis_start,
+                    start_sec=extent.start_sec,
                     duration_sec=analysis_duration,
                 )
             except (RuntimeError, ValueError) as exc:
@@ -328,7 +250,7 @@ def main() -> None:
     if not isinstance(result, TranscriptionResult):
         st.stop()
     if st.session_state.get("raw_midi_request_key") != request_key:
-        st.warning("設定が変更されています。現在の結果は変更前のものです。再生成してください。")
+        st.warning("設定または解析範囲が変更されています。再生成するまで下の結果は旧設定です。")
 
     config = TranscriptionConfig(
         min_midi=min_midi,
@@ -338,7 +260,170 @@ def main() -> None:
         max_gap_ms=float(max_gap_ms),
         onset_split=onset_split,
     )
-    _show_result(result, settings, config, wav_file.name, wav_bytes, sample_rate)
+    _show_result(
+        result=result,
+        settings=settings,
+        config=config,
+        source_name=wav_file.name,
+        wav_bytes=wav_bytes,
+        sample_rate=sample_rate,
+        source_duration_sec=source_duration_sec,
+        preset_key=selected_preset_key,
+    )
+
+
+def _select_analysis_range(
+    *,
+    range_mode: str,
+    source_duration_sec: float,
+    settings: TempoProjectSettings,
+) -> tuple[float, float | None, str]:
+    if range_mode == "全曲":
+        st.success(
+            f"全曲モード：0.000秒から{source_duration_sec:.3f}秒まで、音源の100%を解析します。"
+        )
+        st.caption("イントロの無音も含めて絶対時刻を保つため、解析開始は必ず0秒です。")
+        return 0.0, None, "音源先頭（全曲）"
+
+    selected_duration = 30.0 if range_mode == "30秒で検証" else 60.0
+    selected_duration = min(selected_duration, source_duration_sec)
+    start_mode = st.radio(
+        "開始位置の合わせ方",
+        options=_START_MODES,
+        horizontal=True,
+        key="raw_midi_start_mode",
+        help="解析、音声プレビュー、クリック、ピアノロールが同じ絶対時刻から始まります。",
+    )
+    max_start = max(source_duration_sec - selected_duration, 0.0)
+
+    if start_mode == "先頭拍":
+        analysis_start = min(settings.first_beat_sec, max_start)
+        st.session_state.raw_midi_start = analysis_start
+        return analysis_start, selected_duration, "先頭拍（1小節目）"
+
+    if start_mode == "小節頭":
+        max_bar = maximum_bar_number(
+            first_beat_sec=settings.first_beat_sec,
+            bpm=settings.felt_bpm,
+            duration_sec=source_duration_sec,
+            clip_duration_sec=selected_duration,
+        )
+        current_bar = min(
+            max(int(st.session_state.get("raw_midi_bar_number", 1)), 1),
+            max_bar,
+        )
+        st.session_state.raw_midi_bar_number = current_bar
+        bar_number = st.number_input(
+            "開始小節",
+            min_value=1,
+            max_value=max_bar,
+            step=1,
+            key="raw_midi_bar_number",
+        )
+        analysis_start = min(
+            start_for_bar(settings.first_beat_sec, settings.felt_bpm, int(bar_number)),
+            max_start,
+        )
+        st.session_state.raw_midi_start = analysis_start
+        return analysis_start, selected_duration, f"{int(bar_number)}小節目の頭"
+
+    current_start = min(
+        max(float(st.session_state.get("raw_midi_start", settings.first_beat_sec)), 0.0),
+        float(max_start),
+    )
+    st.session_state.raw_midi_start = current_start
+    analysis_start = st.slider(
+        "自由な開始位置",
+        min_value=0.0,
+        max_value=float(max_start),
+        step=0.01,
+        format="%.3f 秒",
+        key="raw_midi_start",
+    )
+    snap_columns = st.columns(2)
+    snap_columns[0].button(
+        "最寄りの体感拍へスナップ",
+        use_container_width=True,
+        on_click=_snap_raw_start,
+        args=(settings.first_beat_sec, settings.felt_bpm, 1, max_start),
+    )
+    snap_columns[1].button(
+        "最寄りの小節頭へスナップ",
+        use_container_width=True,
+        on_click=_snap_raw_start,
+        args=(settings.first_beat_sec, settings.felt_bpm, 4, max_start),
+    )
+    return analysis_start, selected_duration, "自由位置"
+
+
+def _show_extent_summary(
+    extent: AnalysisExtent,
+    start_description: str,
+    output_stem: str,
+) -> None:
+    columns = st.columns(5)
+    columns[0].metric("解析開始", f"{extent.start_sec:.3f} 秒")
+    columns[1].metric("解析終了", f"{extent.end_sec:.3f} 秒")
+    columns[2].metric("解析時間", _format_duration_precise(extent.duration_sec))
+    columns[3].metric("音源に対する割合", f"{extent.coverage_fraction * 100:.1f}%")
+    columns[4].metric("開始基準", start_description)
+    st.code(f"出力予定: {output_stem}.raw.mid", language=None)
+    if extent.is_full_track:
+        st.success("全曲解析として保存されます。ファイル名に `.full` が付きます。")
+    else:
+        st.warning(
+            "これは設定確認用の部分解析です。4分の曲から30秒を選んだ場合、約12.5%しか含みません。"
+        )
+
+
+def _show_sync_preview(
+    *,
+    audio: np.ndarray,
+    sample_rate: int,
+    extent: AnalysisExtent,
+    source_duration_sec: float,
+    settings: TempoProjectSettings,
+) -> None:
+    nearest_beat = snap_time_to_grid(
+        extent.start_sec,
+        first_beat_sec=settings.first_beat_sec,
+        bpm=settings.felt_bpm,
+    )
+    phase_offset_ms = (extent.start_sec - nearest_beat) * 1_000.0
+    st.metric("体感拍との位相差", f"{phase_offset_ms:+.0f} ms")
+
+    grid_beats = generate_fixed_beat_times(
+        settings.grid_bpm,
+        settings.first_beat_sec,
+        source_duration_sec,
+    )
+    bar_starts = generate_bar_times(
+        settings.first_beat_sec,
+        settings.felt_bpm,
+        source_duration_sec,
+    )
+    original_preview = render_wav_segment(
+        audio,
+        sample_rate,
+        extent.start_sec,
+        extent.duration_sec,
+    )
+    click_preview = render_click_preview(
+        audio,
+        sample_rate,
+        grid_beats,
+        extent.start_sec,
+        extent.duration_sec,
+        accent_times_sec=bar_starts,
+    )
+    original_column, click_column = st.columns(2)
+    with original_column:
+        st.markdown("**解析対象の元音源**")
+        st.audio(original_preview, format="audio/wav")
+    with click_column:
+        st.markdown("**同じ開始位置のクリック付き音源**")
+        st.audio(click_preview, format="audio/wav")
+    st.caption("高いクリックは小節頭、低いクリックは内部グリッドです。")
 
 
 def _show_source_summary(
@@ -367,27 +452,45 @@ def _show_source_summary(
 
 
 def _show_result(
+    *,
     result: TranscriptionResult,
     settings: TempoProjectSettings,
     config: TranscriptionConfig,
     source_name: str,
     wav_bytes: bytes,
     sample_rate: int,
+    source_duration_sec: float,
+    preset_key: str,
 ) -> None:
-    st.subheader("検証結果")
+    st.subheader("検出結果")
+    preset = get_transcription_preset(preset_key)
+    extent = calculate_analysis_extent(
+        source_duration_sec=source_duration_sec,
+        start_sec=result.analysis_start_sec,
+        requested_duration_sec=result.analysis_end_sec - result.analysis_start_sec,
+    )
     durations = [note.duration_sec for note in result.notes]
     pitches = [note.pitch for note in result.notes]
-    metrics = st.columns(4)
-    metrics[0].metric("検出音符", len(result.notes))
-    metrics[1].metric("有声音率", f"{result.voiced_fraction * 100:.1f}%")
-    metrics[2].metric("中央確信度", f"{result.median_confidence:.2f}")
-    metrics[3].metric(
+    metrics = st.columns(5)
+    metrics[0].metric("解析済み", f"{extent.coverage_fraction * 100:.1f}%")
+    metrics[1].metric("検出音符", len(result.notes))
+    metrics[2].metric("有声音率", f"{result.voiced_fraction * 100:.1f}%")
+    metrics[3].metric("中央確信度", f"{result.median_confidence:.2f}")
+    metrics[4].metric(
         "中央音長",
         f"{np.median(durations) * 1_000:.0f} ms" if durations else "—",
     )
+    if extent.is_full_track:
+        st.success(
+            f"全曲結果です：{extent.start_sec:.3f}〜{extent.end_sec:.3f}秒を解析しました。"
+        )
+    else:
+        st.warning(
+            f"部分結果です：{extent.start_sec:.3f}〜{extent.end_sec:.3f}秒のみ。"
+            "曲全体のメロディではありません。"
+        )
 
     _show_quality_hints(result, config)
-
     figure = plot_transcription(
         result,
         grid_bpm=settings.grid_bpm,
@@ -411,11 +514,13 @@ def _show_result(
         ]
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
+    output_stem = build_output_stem(source_name, extent)
     midi_bytes = render_raw_midi(
         result.notes,
         bpm=settings.grid_bpm,
         first_beat_sec=settings.first_beat_sec,
-        track_name=f"{Path(source_name).stem} Raw",
+        track_name=f"{Path(source_name).stem} {preset.label} Raw",
+        program=preset.midi_program,
     )
     notes_payload = _build_notes_payload(
         result=result,
@@ -424,13 +529,15 @@ def _show_result(
         source_name=source_name,
         wav_bytes=wav_bytes,
         sample_rate=sample_rate,
+        source_duration_sec=source_duration_sec,
+        preset_key=preset_key,
+        extent=extent,
     )
-    stem = Path(source_name).stem
     left, right = st.columns(2)
     left.download_button(
         "Raw MIDIをダウンロード",
         data=midi_bytes,
-        file_name=f"{stem}.raw.mid",
+        file_name=f"{output_stem}.raw.mid",
         mime="audio/midi",
         type="primary",
         use_container_width=True,
@@ -438,7 +545,7 @@ def _show_result(
     right.download_button(
         "検出ノートJSONをダウンロード",
         data=json.dumps(notes_payload, ensure_ascii=False, indent=2),
-        file_name=f"{stem}.raw-notes.json",
+        file_name=f"{output_stem}.raw-notes.json",
         mime="application/json",
         use_container_width=True,
     )
@@ -465,9 +572,9 @@ def _show_quality_hints(result: TranscriptionResult, config: TranscriptionConfig
     if np.median(durations) < 0.12 or notes_per_minute > 300:
         st.warning("音符が細切れの可能性があります。最短音符または無音補完を増やしてください。")
     if config.min_midi in pitches or config.max_midi in pitches:
-        st.warning("設定した音域の端に音符があります。実音が切れていないか音域を広げて確認してください。")
+        st.warning("設定音域の端に音符があります。実音が切れていないか音域を広げてください。")
     if result.voiced_fraction < 0.05:
-        st.warning("有声音率が非常に低いです。解析区間にベース演奏があるか確認してください。")
+        st.warning("有声音率が非常に低いです。解析区間に対象の演奏や歌唱があるか確認してください。")
 
 
 def _build_notes_payload(
@@ -478,15 +585,26 @@ def _build_notes_payload(
     source_name: str,
     wav_bytes: bytes,
     sample_rate: int,
+    source_duration_sec: float,
+    preset_key: str,
+    extent: AnalysisExtent,
 ) -> dict[str, object]:
+    preset = get_transcription_preset(preset_key)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "transcription_method": "librosa.pyin-monophonic",
+        "transcription_preset": preset.key,
+        "transcription_preset_label": preset.label,
+        "midi_program": preset.midi_program,
         "source_file": source_name,
         "source_sha256": hashlib.sha256(wav_bytes).hexdigest(),
         "sample_rate": sample_rate,
+        "source_duration_sec": round(source_duration_sec, 6),
         "analysis_start_sec": round(result.analysis_start_sec, 6),
         "analysis_end_sec": round(result.analysis_end_sec, 6),
+        "analyzed_duration_sec": round(extent.duration_sec, 6),
+        "analyzed_fraction": round(extent.coverage_fraction, 6),
+        "is_full_track": extent.is_full_track,
         "tempo": {
             "felt_bpm": settings.felt_bpm,
             "grid_multiplier": settings.grid_multiplier,
@@ -519,6 +637,31 @@ def _build_notes_payload(
             for note in result.notes
         ],
     }
+
+
+def _initialize_preset_state(source_name: str, wav_bytes: bytes) -> None:
+    source_key = f"{source_name}:{hashlib.sha256(wav_bytes).hexdigest()}"
+    if st.session_state.get("raw_midi_preset_source") == source_key:
+        return
+    suggested = suggest_transcription_preset(source_name)
+    st.session_state.raw_midi_preset_source = source_key
+    st.session_state.raw_midi_preset_key = suggested.key
+    _set_preset_values(suggested.key)
+
+
+def _apply_selected_preset() -> None:
+    key = str(st.session_state.raw_midi_preset_key)
+    _set_preset_values(key)
+
+
+def _set_preset_values(key: str) -> None:
+    preset = get_transcription_preset(key)
+    st.session_state.raw_midi_min_midi = preset.min_midi
+    st.session_state.raw_midi_max_midi = preset.max_midi
+    st.session_state.raw_midi_voicing_threshold = preset.voicing_threshold
+    st.session_state.raw_midi_min_note_ms = round(preset.min_note_ms)
+    st.session_state.raw_midi_max_gap_ms = round(preset.max_gap_ms)
+    st.session_state.raw_midi_onset_split = preset.onset_split
 
 
 def _snap_raw_start(
@@ -558,6 +701,12 @@ def _format_duration(seconds: float) -> str:
     total_seconds = max(round(seconds), 0)
     minutes, remaining = divmod(total_seconds, 60)
     return f"{minutes}:{remaining:02d}"
+
+
+def _format_duration_precise(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f} 秒"
+    return _format_duration(seconds)
 
 
 if __name__ == "__main__":
