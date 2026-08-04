@@ -9,6 +9,12 @@ import streamlit as st
 
 from stem_to_midi.plotting import plot_waveform_with_beats
 from stem_to_midi.preview import render_click_preview, render_wav_segment
+from stem_to_midi.project import (
+    SourceMatch,
+    TempoProjectSettings,
+    evaluate_source_match,
+    parse_tempo_project,
+)
 from stem_to_midi.tempo import (
     TempoAnalysis,
     analyze_tempo,
@@ -49,6 +55,11 @@ def main() -> None:
         return
 
     _initialize_state(source_digest, analysis)
+    _render_project_import(
+        source_digest=source_digest,
+        source_file=uploaded.name,
+        duration_sec=analysis.duration_sec,
+    )
 
     metrics = st.columns(4)
     metrics[0].metric("長さ", _format_duration(analysis.duration_sec))
@@ -124,16 +135,8 @@ def main() -> None:
     grid_bpm = felt_bpm * grid_multiplier
     first_beat_sec = float(st.session_state.first_beat_sec)
 
-    felt_beats = generate_fixed_beat_times(
-        felt_bpm,
-        first_beat_sec,
-        analysis.duration_sec,
-    )
-    grid_beats = generate_fixed_beat_times(
-        grid_bpm,
-        first_beat_sec,
-        analysis.duration_sec,
-    )
+    felt_beats = generate_fixed_beat_times(felt_bpm, first_beat_sec, analysis.duration_sec)
+    grid_beats = generate_fixed_beat_times(grid_bpm, first_beat_sec, analysis.duration_sec)
     diagnostics = calculate_grid_diagnostics(
         duration_sec=analysis.duration_sec,
         first_beat_sec=first_beat_sec,
@@ -247,6 +250,7 @@ def main() -> None:
         "nearest_detected_beat_sec": _round_optional(
             diagnostics.nearest_detected_beat_sec
         ),
+        "first_beat_sec": round(first_beat_sec, 6),
         "corrected_first_beat_sec": round(first_beat_sec, 6),
         "first_beat_offset_ms": _round_optional(
             diagnostics.first_beat_offset_sec,
@@ -272,6 +276,106 @@ def main() -> None:
     st.caption(
         "この版は固定テンポの調整に限定しています。"
         "Follow tempo changesのテンポマップ編集は次段階です。"
+    )
+
+
+def _render_project_import(
+    *,
+    source_digest: str,
+    source_file: str,
+    duration_sec: float,
+) -> None:
+    with st.expander("保存済みtempo.jsonから作業を再開", expanded=False):
+        project_file = st.file_uploader(
+            "tempo.json（任意）",
+            type=["json"],
+            key="tempo_project_file",
+        )
+        if project_file is None:
+            st.caption("旧形式Version 1と現在のVersion 2に対応しています。")
+            return
+
+        try:
+            settings = parse_tempo_project(project_file.getvalue())
+        except (TypeError, ValueError) as exc:
+            st.error(f"JSONを読み込めませんでした: {exc}")
+            return
+
+        source_match = evaluate_source_match(
+            settings,
+            source_sha256=source_digest,
+            source_file=source_file,
+            duration_sec=duration_sec,
+        )
+        _show_project_summary(settings, source_match)
+
+        first_beat_valid = settings.first_beat_sec <= duration_sec
+        if not first_beat_valid:
+            st.error(
+                "JSONの先頭拍位置が選択中のWAVの長さを超えています。"
+                "この設定は適用できません。"
+            )
+
+        allow_mismatch = source_match.status != "mismatch"
+        if source_match.status == "mismatch":
+            allow_mismatch = st.checkbox(
+                "WAVが一致しなくても、テンポ設定だけ適用する",
+                key="allow_mismatched_project",
+            )
+
+        st.button(
+            "JSONの設定を適用",
+            type="primary",
+            disabled=not first_beat_valid or not allow_mismatch,
+            on_click=_apply_project_settings,
+            args=(settings,),
+        )
+
+    applied_message = st.session_state.pop("project_applied_message", None)
+    if applied_message:
+        st.success(applied_message)
+
+
+def _show_project_summary(
+    settings: TempoProjectSettings,
+    source_match: SourceMatch,
+) -> None:
+    if settings.schema_version == 1:
+        st.info("Version 1のJSONをVersion 2の設定へ変換して読み込みました。")
+    else:
+        st.success("Version 2のJSONを読み込みました。")
+
+    if source_match.status == "match":
+        method = "SHA-256" if source_match.method == "sha256" else "ファイル名と長さ"
+        st.success(f"選択中のWAVと一致しました（{method}）。")
+    elif source_match.status == "mismatch":
+        method = "SHA-256" if source_match.method == "sha256" else "ファイル名または長さ"
+        st.warning(f"選択中のWAVと一致しません（{method}）。")
+    else:
+        st.warning("照合情報がないため、選択中のWAVとの一致を確認できません。")
+
+    columns = st.columns(3)
+    columns[0].metric("体感テンポ", f"{settings.felt_bpm:.2f} BPM")
+    columns[1].metric(
+        "内部グリッド",
+        f"{settings.grid_bpm:.2f} BPM",
+        delta=f"×{settings.grid_multiplier}",
+        delta_color="off",
+    )
+    columns[2].metric("先頭拍", f"{settings.first_beat_sec:.3f} 秒")
+
+
+def _apply_project_settings(settings: TempoProjectSettings) -> None:
+    st.session_state.felt_bpm = float(settings.felt_bpm)
+    st.session_state.grid_multiplier = int(settings.grid_multiplier)
+    st.session_state.first_beat_sec = float(settings.first_beat_sec)
+    st.session_state.preview_start = min(
+        float(st.session_state.get("preview_start", 0.0)),
+        settings.first_beat_sec,
+    )
+    st.session_state.project_applied_message = (
+        f"JSONの設定を適用しました：{settings.felt_bpm:.2f} BPM、"
+        f"内部グリッド×{settings.grid_multiplier}、先頭拍{settings.first_beat_sec:.3f}秒"
     )
 
 
