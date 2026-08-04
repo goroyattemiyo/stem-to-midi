@@ -34,3 +34,19 @@ def test_render_raw_midi_preserves_absolute_note_timing() -> None:
             note_on_ticks.append(absolute_tick)
 
     assert note_on_ticks == [960, 1920]
+
+
+def test_render_raw_midi_accepts_non_ascii_track_name() -> None:
+    notes = (NoteEvent(0.5, 1.0, 60, 90, 0.9, 60.0),)
+
+    data = render_raw_midi(
+        notes,
+        bpm=120.0,
+        first_beat_sec=0.0,
+        track_name="日本語ファイル ボーカル／主旋律 Raw",
+        program=53,
+    )
+    midi_file = mido.MidiFile(file=BytesIO(data))
+    track_names = [message.name for message in midi_file.tracks[1] if message.type == "track_name"]
+
+    assert track_names == ["Raw"]
