@@ -16,7 +16,6 @@ from stem_to_midi.tempo import (
     load_wav_bytes,
 )
 
-
 st.set_page_config(page_title="Stem to MIDI — Tempo Lab", page_icon="🎵", layout="wide")
 
 
