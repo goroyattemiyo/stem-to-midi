@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from stem_to_midi.tempo import generate_fixed_beat_times, load_wav_bytes
+from stem_to_midi.tempo import (
+    calculate_grid_diagnostics,
+    generate_fixed_beat_times,
+    load_wav_bytes,
+)
 
 
 def test_generate_fixed_beat_times_at_120_bpm() -> None:
@@ -18,6 +22,30 @@ def test_generate_fixed_beat_times_at_120_bpm() -> None:
 def test_generate_fixed_beat_times_rejects_invalid_bpm() -> None:
     with pytest.raises(ValueError, match="BPM"):
         generate_fixed_beat_times(bpm=0.0, first_beat_sec=0.0, duration_sec=1.0)
+
+
+def test_calculate_grid_diagnostics_uses_nearest_detected_beat() -> None:
+    diagnostics = calculate_grid_diagnostics(
+        duration_sec=10.0,
+        first_beat_sec=2.32,
+        detected_beats_sec=(1.909333, 2.336, 2.762667),
+    )
+
+    assert diagnostics.nearest_detected_beat_sec == pytest.approx(2.336)
+    assert diagnostics.first_beat_offset_sec == pytest.approx(-0.016)
+    assert diagnostics.detection_tail_sec == pytest.approx(7.237333)
+
+
+def test_calculate_grid_diagnostics_without_detected_beats() -> None:
+    diagnostics = calculate_grid_diagnostics(
+        duration_sec=4.5,
+        first_beat_sec=0.25,
+        detected_beats_sec=(),
+    )
+
+    assert diagnostics.nearest_detected_beat_sec is None
+    assert diagnostics.first_beat_offset_sec is None
+    assert diagnostics.detection_tail_sec == pytest.approx(4.5)
 
 
 def test_load_wav_bytes_converts_stereo_to_mono() -> None:
