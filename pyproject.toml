@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stem-to-midi"
+version = "0.1.0"
+description = "Local tempo analysis lab for preparing separated audio stems for MIDI transcription"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "librosa>=0.11,<1",
+  "matplotlib>=3.8,<4",
+  "numpy>=1.26,<3",
+  "soundfile>=0.13,<1",
+  "streamlit>=1.51,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.12,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stem_to_midi*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
