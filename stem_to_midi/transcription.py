@@ -83,8 +83,8 @@ def transcribe_monophonic(
     if end <= start:
         raise ValueError("Selected analysis range is empty")
 
-    start_sample = int(round(start * sample_rate))
-    end_sample = int(round(end * sample_rate))
+    start_sample = round(start * sample_rate)
+    end_sample = round(end * sample_rate)
     segment = signal[start_sample:end_sample]
     analysis_signal = _resample(segment, sample_rate, config.analysis_sample_rate)
     if analysis_signal.size < config.frame_length:
@@ -221,7 +221,7 @@ def extract_note_events(
     )
     rounded_pitch[valid] = np.rint(midi_values[valid]).astype(int)
 
-    max_gap_frames = max(int(round((config.max_gap_ms / 1_000.0) / frame_step)), 0)
+    max_gap_frames = max(round((config.max_gap_ms / 1_000.0) / frame_step), 0)
     _fill_short_same_pitch_gaps(rounded_pitch, max_gap_frames)
 
     minimum_frames = max(int(np.ceil((config.min_note_ms / 1_000.0) / frame_step)), 1)
