@@ -112,7 +112,7 @@ def _safe_midi_text(value: str, *, fallback: str) -> str:
 
     normalized = unicodedata.normalize("NFKD", value)
     ascii_value = normalized.encode("ascii", errors="ignore").decode("ascii")
-    compact = " ".join(ascii_value.split())
+    compact = " ".join(ascii_value.split()).strip(" -_./\\")
     return compact[:127] or fallback
 
 
