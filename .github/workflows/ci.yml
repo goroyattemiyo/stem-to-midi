@@ -15,5 +15,9 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: ruff check .
+      - name: Show Ruff import fix
+        run: |
+          ruff check --fix .
+          git diff -- app.py
+          git diff --exit-code
       - run: pytest
