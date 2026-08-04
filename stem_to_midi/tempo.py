@@ -18,6 +18,15 @@ class TempoAnalysis:
     detected_beat_times_sec: tuple[float, ...]
 
 
+@dataclass(frozen=True)
+class GridDiagnostics:
+    """Diagnostics for comparing a corrected grid with detected beats."""
+
+    nearest_detected_beat_sec: float | None
+    first_beat_offset_sec: float | None
+    detection_tail_sec: float
+
+
 def load_wav_bytes(data: bytes) -> tuple[np.ndarray, int]:
     """Decode WAV bytes into a finite mono float32 signal."""
 
@@ -97,3 +106,34 @@ def generate_fixed_beat_times(
     count = int(np.floor((duration_sec - first_beat_sec) / interval_sec)) + 1
     values = first_beat_sec + np.arange(count, dtype=float) * interval_sec
     return tuple(float(value) for value in values if value <= duration_sec + 1e-9)
+
+
+def calculate_grid_diagnostics(
+    duration_sec: float,
+    first_beat_sec: float,
+    detected_beats_sec: tuple[float, ...] | list[float],
+) -> GridDiagnostics:
+    """Compare a corrected first beat with the nearest detected beat."""
+
+    if not np.isfinite(duration_sec) or duration_sec < 0:
+        raise ValueError("Duration must be non-negative")
+    if not np.isfinite(first_beat_sec) or first_beat_sec < 0:
+        raise ValueError("First beat position must be non-negative")
+
+    beats = np.asarray(detected_beats_sec, dtype=float).reshape(-1)
+    beats = beats[np.isfinite(beats)]
+    beats = beats[(beats >= 0.0) & (beats <= duration_sec)]
+    if beats.size == 0:
+        return GridDiagnostics(
+            nearest_detected_beat_sec=None,
+            first_beat_offset_sec=None,
+            detection_tail_sec=float(duration_sec),
+        )
+
+    nearest = float(beats[np.argmin(np.abs(beats - first_beat_sec))])
+    tail = max(float(duration_sec) - float(np.max(beats)), 0.0)
+    return GridDiagnostics(
+        nearest_detected_beat_sec=nearest,
+        first_beat_offset_sec=float(first_beat_sec - nearest),
+        detection_tail_sec=tail,
+    )
