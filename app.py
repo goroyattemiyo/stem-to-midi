@@ -10,10 +10,10 @@ import streamlit as st
 from stem_to_midi.plotting import plot_waveform_with_beats
 from stem_to_midi.preview import render_click_preview, render_wav_segment
 from stem_to_midi.tempo import (
-    TempoAnalysis,
     analyze_tempo,
     generate_fixed_beat_times,
     load_wav_bytes,
+    TempoAnalysis,
 )
 
 
@@ -42,7 +42,7 @@ def main() -> None:
     try:
         with st.spinner("テンポと拍位置を解析しています…"):
             audio, sample_rate, analysis = decode_and_analyze(wav_bytes)
-    except Exception as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         st.error(f"WAVを解析できませんでした: {exc}")
         return
 
@@ -217,7 +217,7 @@ def _shift_first_beat(delta_sec: float, duration_sec: float) -> None:
 
 
 def _format_duration(seconds: float) -> str:
-    total_seconds = max(int(round(seconds)), 0)
+    total_seconds = max(round(seconds), 0)
     minutes, remaining = divmod(total_seconds, 60)
     return f"{minutes}:{remaining:02d}"
 
