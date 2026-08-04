@@ -8,10 +8,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 
+from stem_to_midi.alignment import (
+    generate_bar_times,
+    maximum_bar_number,
+    snap_time_to_grid,
+    start_for_bar,
+)
 from stem_to_midi.midi_export import render_raw_midi
-from stem_to_midi.preview import render_wav_segment
+from stem_to_midi.preview import render_click_preview, render_wav_segment
 from stem_to_midi.project import TempoProjectSettings, parse_tempo_project
-from stem_to_midi.tempo import load_wav_bytes
+from stem_to_midi.tempo import generate_fixed_beat_times, load_wav_bytes
 from stem_to_midi.transcription import (
     TranscriptionConfig,
     TranscriptionResult,
@@ -20,6 +26,8 @@ from stem_to_midi.transcription import (
 from stem_to_midi.transcription_plot import plot_transcription
 
 st.set_page_config(page_title="Stem to MIDI — Raw MIDI Lab", page_icon="🎸", layout="wide")
+
+_START_MODES = ("先頭拍", "小節頭", "自由位置")
 
 
 @st.cache_data(show_spinner=False)
@@ -142,37 +150,146 @@ def main() -> None:
         st.error("最低音は最高音より低くしてください。")
         st.stop()
 
-    st.subheader("解析範囲")
+    st.subheader("解析範囲と同期確認")
     range_mode = st.radio(
         "処理量",
         options=("30秒で検証", "60秒で検証", "全曲"),
         horizontal=True,
     )
+    start_description = "音源先頭"
     if range_mode == "全曲":
         analysis_start = 0.0
         analysis_duration: float | None = None
         st.caption(
             f"全曲 {_format_duration(duration_sec)} を解析します。数分かかる場合があります。"
         )
+        st.info(
+            "全曲モードはイントロも保持するため0秒から解析します。"
+            "同期確認は30秒または60秒モードで行ってください。"
+        )
     else:
         selected_duration = 30.0 if range_mode == "30秒で検証" else 60.0
         selected_duration = min(selected_duration, duration_sec)
+        start_mode = st.radio(
+            "開始位置の合わせ方",
+            options=_START_MODES,
+            horizontal=True,
+            key="raw_midi_start_mode",
+            help=(
+                "先頭拍と小節頭では、解析・波形・音声・クリックが同じ絶対時刻から始まります。"
+            ),
+        )
         max_start = max(duration_sec - selected_duration, 0.0)
-        current_start = min(
-            float(st.session_state.get("raw_midi_start", 0.0)),
-            float(max_start),
+        if start_mode == "先頭拍":
+            analysis_start = min(settings.first_beat_sec, duration_sec)
+            st.session_state.raw_midi_start = analysis_start
+            start_description = "先頭拍（1小節目）"
+        elif start_mode == "小節頭":
+            max_bar = maximum_bar_number(
+                first_beat_sec=settings.first_beat_sec,
+                bpm=settings.felt_bpm,
+                duration_sec=duration_sec,
+                clip_duration_sec=selected_duration,
+            )
+            current_bar = min(
+                max(int(st.session_state.get("raw_midi_bar_number", 1)), 1),
+                max_bar,
+            )
+            st.session_state.raw_midi_bar_number = current_bar
+            bar_number = st.number_input(
+                "開始小節",
+                min_value=1,
+                max_value=max_bar,
+                step=1,
+                key="raw_midi_bar_number",
+            )
+            analysis_start = start_for_bar(
+                settings.first_beat_sec,
+                settings.felt_bpm,
+                int(bar_number),
+            )
+            st.session_state.raw_midi_start = analysis_start
+            start_description = f"{int(bar_number)}小節目の頭"
+        else:
+            current_start = min(
+                max(float(st.session_state.get("raw_midi_start", settings.first_beat_sec)), 0.0),
+                float(max_start),
+            )
+            st.session_state.raw_midi_start = current_start
+            analysis_start = st.slider(
+                "自由な開始位置",
+                min_value=0.0,
+                max_value=float(max_start),
+                step=0.01,
+                format="%.3f 秒",
+                key="raw_midi_start",
+            )
+            snap_columns = st.columns(2)
+            snap_columns[0].button(
+                "最寄りの体感拍へスナップ",
+                use_container_width=True,
+                on_click=_snap_raw_start,
+                args=(settings.first_beat_sec, settings.felt_bpm, 1, max_start),
+            )
+            snap_columns[1].button(
+                "最寄りの小節頭へスナップ",
+                use_container_width=True,
+                on_click=_snap_raw_start,
+                args=(settings.first_beat_sec, settings.felt_bpm, 4, max_start),
+            )
+            start_description = "自由位置"
+
+        analysis_duration = min(selected_duration, max(duration_sec - analysis_start, 0.0))
+        if analysis_duration <= 0.0:
+            st.error("選択した開始位置より後に解析できる音声がありません。")
+            st.stop()
+
+        nearest_beat = snap_time_to_grid(
+            analysis_start,
+            first_beat_sec=settings.first_beat_sec,
+            bpm=settings.felt_bpm,
         )
-        st.session_state.raw_midi_start = current_start
-        analysis_start = st.slider(
-            "開始位置",
-            min_value=0.0,
-            max_value=float(max_start),
-            step=0.1,
-            key="raw_midi_start",
+        phase_offset_ms = (analysis_start - nearest_beat) * 1_000.0
+        summary_columns = st.columns(3)
+        summary_columns[0].metric("解析・確認開始", f"{analysis_start:.3f} 秒")
+        summary_columns[1].metric("開始基準", start_description)
+        summary_columns[2].metric("体感拍との位相差", f"{phase_offset_ms:+.0f} ms")
+
+        grid_beats = generate_fixed_beat_times(
+            settings.grid_bpm,
+            settings.first_beat_sec,
+            duration_sec,
         )
-        analysis_duration = selected_duration
-        preview = render_wav_segment(audio, sample_rate, analysis_start, selected_duration)
-        st.audio(preview, format="audio/wav")
+        bar_starts = generate_bar_times(
+            settings.first_beat_sec,
+            settings.felt_bpm,
+            duration_sec,
+        )
+        original_preview = render_wav_segment(
+            audio,
+            sample_rate,
+            analysis_start,
+            analysis_duration,
+        )
+        click_preview = render_click_preview(
+            audio,
+            sample_rate,
+            grid_beats,
+            analysis_start,
+            analysis_duration,
+            accent_times_sec=bar_starts,
+        )
+        original_column, click_column = st.columns(2)
+        with original_column:
+            st.markdown("**解析対象の元音源**")
+            st.audio(original_preview, format="audio/wav")
+        with click_column:
+            st.markdown("**同じ開始位置のクリック付き音源**")
+            st.audio(click_preview, format="audio/wav")
+        st.caption(
+            "高いクリックは小節頭、低いクリックは内部グリッドです。"
+            "先頭拍／小節頭モードでは再生開始サンプルに高いクリックが置かれます。"
+        )
 
     request_key = _request_key(
         wav_bytes=wav_bytes,
@@ -402,6 +519,22 @@ def _build_notes_payload(
             for note in result.notes
         ],
     }
+
+
+def _snap_raw_start(
+    first_beat_sec: float,
+    bpm: float,
+    beats_per_step: int,
+    maximum_sec: float,
+) -> None:
+    current = float(st.session_state.get("raw_midi_start", first_beat_sec))
+    st.session_state.raw_midi_start = snap_time_to_grid(
+        current,
+        first_beat_sec=first_beat_sec,
+        bpm=bpm,
+        beats_per_step=beats_per_step,
+        maximum_sec=maximum_sec,
+    )
 
 
 def _request_key(**values: object) -> str:

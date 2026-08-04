@@ -7,6 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import streamlit as st
 
+from stem_to_midi.alignment import generate_bar_times, snap_time_to_grid
 from stem_to_midi.plotting import plot_waveform_with_beats
 from stem_to_midi.preview import render_click_preview, render_wav_segment
 from stem_to_midi.project import (
@@ -137,6 +138,7 @@ def main() -> None:
 
     felt_beats = generate_fixed_beat_times(felt_bpm, first_beat_sec, analysis.duration_sec)
     grid_beats = generate_fixed_beat_times(grid_bpm, first_beat_sec, analysis.duration_sec)
+    bar_starts = generate_bar_times(first_beat_sec, felt_bpm, analysis.duration_sec)
     diagnostics = calculate_grid_diagnostics(
         duration_sec=analysis.duration_sec,
         first_beat_sec=first_beat_sec,
@@ -177,22 +179,48 @@ def main() -> None:
         value=15,
         format_func=lambda value: f"{value}秒",
     )
+    follow_first_beat = st.checkbox(
+        "確認開始位置を先頭拍に合わせる",
+        key="preview_follow_first_beat",
+        help="先頭拍を動かすと、波形・元音源・クリック付き音源の開始位置も追従します。",
+    )
     max_start = max(analysis.duration_sec - preview_duration, 0.0)
-    if max_start <= 0.0:
+    if follow_first_beat:
+        preview_start = min(first_beat_sec, analysis.duration_sec)
+        st.session_state.preview_start = preview_start
+        st.success(
+            f"確認開始 {preview_start:.3f}秒 = 先頭拍。"
+            "再生直後の高いクリックが1小節目の頭です。"
+        )
+    elif max_start <= 0.0:
         preview_start = 0.0
         st.session_state.preview_start = 0.0
         st.caption("音源が確認区間より短いため、先頭から再生します。")
     else:
         st.session_state.preview_start = min(
-            float(st.session_state.get("preview_start", 0.0)),
+            float(st.session_state.get("preview_start", first_beat_sec)),
             float(max_start),
         )
         preview_start = st.slider(
             "確認開始位置",
             min_value=0.0,
             max_value=float(max_start),
-            step=0.1,
+            step=0.01,
+            format="%.3f 秒",
             key="preview_start",
+        )
+        snap_columns = st.columns(2)
+        snap_columns[0].button(
+            "最寄りの体感拍へスナップ",
+            use_container_width=True,
+            on_click=_snap_preview_start,
+            args=(first_beat_sec, felt_bpm, 1, max_start),
+        )
+        snap_columns[1].button(
+            "最寄りの小節頭へスナップ",
+            use_container_width=True,
+            on_click=_snap_preview_start,
+            args=(first_beat_sec, felt_bpm, 4, max_start),
         )
 
     figure = plot_waveform_with_beats(
@@ -220,6 +248,7 @@ def main() -> None:
         preview_beats,
         preview_start,
         float(preview_duration),
+        accent_times_sec=bar_starts,
     )
 
     original_column, click_column = st.columns(2)
@@ -227,7 +256,7 @@ def main() -> None:
         st.markdown("**元音源**")
         st.audio(original_preview, format="audio/wav")
     with click_column:
-        st.markdown(f"**クリック付き（{click_mode}）**")
+        st.markdown(f"**クリック付き（{click_mode}／小節頭アクセント）**")
         st.audio(click_preview, format="audio/wav")
 
     payload = {
@@ -369,10 +398,8 @@ def _apply_project_settings(settings: TempoProjectSettings) -> None:
     st.session_state.felt_bpm = float(settings.felt_bpm)
     st.session_state.grid_multiplier = int(settings.grid_multiplier)
     st.session_state.first_beat_sec = float(settings.first_beat_sec)
-    st.session_state.preview_start = min(
-        float(st.session_state.get("preview_start", 0.0)),
-        settings.first_beat_sec,
-    )
+    st.session_state.preview_start = float(settings.first_beat_sec)
+    st.session_state.preview_follow_first_beat = True
     st.session_state.project_applied_message = (
         f"JSONの設定を適用しました：{settings.felt_bpm:.2f} BPM、"
         f"内部グリッド×{settings.grid_multiplier}、先頭拍{settings.first_beat_sec:.3f}秒"
@@ -398,14 +425,17 @@ def _initialize_state(source_digest: str, analysis: TempoAnalysis) -> None:
         if "first_beat_sec" not in st.session_state:
             st.session_state.first_beat_sec = float(first_detected)
         if "preview_start" not in st.session_state:
-            st.session_state.preview_start = 0.0
+            st.session_state.preview_start = float(first_detected)
+        if "preview_follow_first_beat" not in st.session_state:
+            st.session_state.preview_follow_first_beat = True
         return
 
     st.session_state.source_digest = source_digest
     st.session_state.felt_bpm = float(fallback_bpm)
     st.session_state.grid_multiplier = 1
     st.session_state.first_beat_sec = float(first_detected)
-    st.session_state.preview_start = 0.0
+    st.session_state.preview_start = float(first_detected)
+    st.session_state.preview_follow_first_beat = True
 
 
 def _scale_felt_bpm(factor: float) -> None:
@@ -424,6 +454,24 @@ def _scale_felt_bpm(factor: float) -> None:
 def _shift_first_beat(delta_sec: float, duration_sec: float) -> None:
     current = float(st.session_state.first_beat_sec)
     st.session_state.first_beat_sec = min(max(current + delta_sec, 0.0), duration_sec)
+    if bool(st.session_state.get("preview_follow_first_beat", True)):
+        st.session_state.preview_start = st.session_state.first_beat_sec
+
+
+def _snap_preview_start(
+    first_beat_sec: float,
+    bpm: float,
+    beats_per_step: int,
+    maximum_sec: float,
+) -> None:
+    current = float(st.session_state.get("preview_start", first_beat_sec))
+    st.session_state.preview_start = snap_time_to_grid(
+        current,
+        first_beat_sec=first_beat_sec,
+        bpm=bpm,
+        beats_per_step=beats_per_step,
+        maximum_sec=maximum_sec,
+    )
 
 
 def _infer_grid_multiplier(felt_bpm: float, detected_bpm: float) -> int:
