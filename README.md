@@ -1,110 +1,151 @@
-# Stem to MIDI
+# Stem to Score
 
-Sunoなどで分離したWAVステムを、編集可能なMIDIへ変換するためのローカルツールです。
+> Repository: `stem-to-midi`  
+> Working product name: **Stem to Score**
 
-現在は、拍グリッドを確定する **Tempo Lab**、軽量な単音検出を行う **Raw MIDI Lab**、Spotify Basic Pitchで高精度候補を作る **Accuracy Lab** を実装しています。
+Sunoなどで生成した曲を、**人が読んで演奏し、MuseScoreやFlatで修正できる楽譜へ仕上げる**ためのローカルツールです。
+
+Audio-to-MIDIの精度だけを競うのではなく、転写されたMIDIを正しいテンポと小節へ配置し、過剰な16分・32分音符、短い休符、不自然なタイを減らして、実用的な譜面へ変換することを目指します。
+
+```text
+音源 / ステム / 外部MIDI
+  ↓
+テンポ・拍・小節の確定
+  ↓
+演奏イベントへ正規化
+  ↓
+読みやすさを考慮したScore Compiler
+  ↓
+アプリ内の五線譜プレビュー
+  ↓
+Score JSON / Clean MIDI / MusicXML
+```
 
 ## ドキュメント
 
-- [開発ロードマップ](docs/ROADMAP.md): Clean MIDI、Score JSON、五線譜＋TAB編集UI、MusicXML／PDFまでの計画
-- [開発記録](docs/DEVELOPMENT_LOG.md): 環境構築、PRごとの判断、実音源から得た検証履歴
+- [製品設計](docs/PRODUCT_DESIGN.md): 目的、ユーザーフロー、Score Lab、Score Compiler
+- [Score JSON仕様](docs/SCORE_JSON.md): Performance Notesと楽譜イベントのデータ設計
+- [開発ロードマップ](docs/ROADMAP.md): 外部MIDI入力からMusicXMLプレビューまでの実装順
+- [開発記録](docs/DEVELOPMENT_LOG.md): 既存機能、PR、実音源から得た判断
 
-## 現在できること
+## 設計の中心
 
-- WAVファイルの読み込み
+### 演奏情報と楽譜情報を分ける
+
+元音源やMIDIの細かなタイミングは`performance.json`へ残し、楽譜上の位置、音価、休符、タイは`score.json`へ保存します。
+
+譜面を8分音符へ整理しても、元の前ノリ、後ノリ、開始秒、終了秒、検出確信度を失いません。
+
+### MIDIをそのまま楽譜にしない
+
+Score Compilerは複数の譜割り候補を作り、次をまとめて評価します。
+
+- 元演奏とのタイミング誤差
+- 32分音符と32分休符の数
+- 短い休符の数
+- タイの数
+- 小節内の音符密度
+- 前後フレーズとのリズム不一致
+
+UIでは「原音忠実 ↔ 読みやすい」のスライダーとして調整できる設計です。
+
+### 転写方式に依存しない
+
+入力候補は限定しません。
+
+- pYINで生成した単音MIDI
+- Basic Pitchで生成したMIDI
+- OpenMusicなど外部サービスのMIDI
+- DAWや人手で作ったMIDI
+- 将来追加する別の転写バックエンド
+
+どのMIDIも共通のPerformance Notesへ変換し、その後の楽譜処理を共通化します。
+
+## 現在実装済み
+
+### Tempo Lab
+
+- WAV読み込み
 - BPMと拍位置の自動検出
-- 体感テンポとMIDI量子化用の内部グリッドを分けて調整
-- 波形上への検出拍・体感拍・内部グリッド表示
-- BPMの手入力、半分・倍テンポ補正
-- 先頭拍位置の10ms／50ms単位調整
-- 体感拍または内部グリッドを選んだクリック付きプレビュー
-- 確認開始位置の先頭拍追従、拍・小節頭スナップ
-- 保存済みtempo.jsonからの作業再開
-- SHA-256、またはファイル名と長さによるWAV照合
-- pYINによるベース・ボーカルなどの単音ステム追跡
-- Spotify Basic Pitchによる多音対応の高精度候補生成
-- 30秒／60秒区間での先行比較と全曲解析
-- Basic PitchのRaw候補から連続性を重視した単音メロディ経路を抽出
-- 最大同時音、発音カバー率、長い未検出区間、オクターブ級の跳躍を表示
-- Raw MIDI、メロディMIDI、検証用JSONの出力
+- 体感テンポと内部グリッドの分離
+- 先頭拍位置の手動補正
+- 波形、拍線、クリック付きプレビュー
+- `tempo.json`保存と再読込
+- WAV照合
 
-現時点では固定テンポ向けです。可変テンポマップ編集、Clean MIDI、楽器・声部分離、楽譜出力は次段階です。
+### Raw MIDI Lab
 
-## JSONから作業を再開
+- pYINによるベース、ボーカル、単音リードの追跡
+- 30秒、60秒、全曲解析
+- 音域、確信度、最短音、短い隙間の設定
+- ピアノロールと品質警告
+- Raw MIDIと検出ノートJSON出力
 
-WAVを選択した後、「保存済みtempo.jsonから作業を再開」を開いてJSONを選択します。
+### Accuracy Lab
 
-読み込んだJSONから、次の編集状態を復元します。
+- Spotify Basic Pitchによる多音候補生成
+- Raw多音MIDIと単音メロディ候補の出力
+- 音域、オンセット、持続フレーム、最短音の設定
+- 最大同時音、発音カバー率、長い未検出区間、オクターブ跳躍の表示
+- 4/4の体感テンポを使ったMIDI書き出し
 
-- 体感テンポ
-- 内部グリッド倍率
-- 先頭拍位置
+現在のTempo Lab、Raw MIDI Lab、Accuracy Labは、今後は主に時間軸と転写候補を確認する診断機能として使います。
 
-拍時刻の配列はJSONから直接復元せず、設定と現在のWAVの長さから再生成します。元WAVのSHA-256が一致しない場合は警告し、確認チェックを入れるまで適用しません。
+## 次に実装するもの
 
-## 体感テンポと内部グリッド
+1. 外部MIDIのインポート
+2. MIDIを共通Performance Notesへ変換
+3. Score JSON Version 1
+4. 最大16分までの基本クオンタイズ
+5. 休符とタイの生成
+6. MusicXML出力
+7. Verovioによるアプリ内五線譜プレビュー
+8. 読みやすさスライダーと問題小節の候補比較
 
-ハーフタイムに感じる曲では、体感テンポを72 BPM、内部グリッドを144 BPMのように分けられます。
-
-- **体感テンポ**: 4/4の拍と小節を表す音楽的なテンポ
-- **内部グリッド**: 八分音符や16分音符を量子化するための細かい処理グリッド
-
-Accuracy LabのMIDIは4/4の体感テンポで書き出し、内部グリッドはJSONへ保持します。
-
-## Raw MIDI Lab
-
-サイドバーから「Raw MIDI Lab」を開き、音高ステムWAVとtempo.jsonを選びます。
-
-pYINで1本の主要音程を追跡します。軽量で確信度を確認しやすい一方、多声音、倍音の強い歌声、分離ノイズでは音符が抜ける場合があります。
-
-最初は30秒または60秒だけ解析し、問題が少なければ全曲へ切り替えます。出力は無量子化のRaw MIDIと検出ノートJSONです。
-
-## Accuracy Lab
-
-サイドバーから「Accuracy Lab」を開き、Raw MIDI Labと同じWAVとtempo.jsonを選びます。
-
-Spotify Basic Pitchを使い、次の2種類を出力します。
-
-- **Basic Pitch Raw MIDI**: モデルが検出した多声音候補を保持
-- **メロディMIDI**: 音の長さ、強さ、前後の音程連続性から単音経路を選択
-
-まず同じ30秒区間をpYIN版と比較してください。メロディMIDIで倍音誤検出が増える場合は、音域、オンセットしきい値、持続フレームしきい値、最短音符を調整します。
-
-Basic Pitchは任意依存です。通常セットアップ後、次を追加実行します。
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[accuracy]"
-```
-
-インストール後はStreamlitを停止し、再起動してください。
+最初のMVPは、固定テンポ、4/4、単旋律1パートに限定します。
 
 ## セットアップ
 
 Python 3.11を推奨します。
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
-pip install -e ".[dev]"
+### Windows
+
+```powershell
+cd C:\dev\stem-to-midi
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-WindowsでAccuracy Labも使う場合:
+Accuracy Labも使う場合:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,accuracy]"
 ```
 
+### macOS / Linux
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
 ## 起動
+
+### Windows
+
+```powershell
+cd C:\dev\stem-to-midi
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+### macOS / Linux
 
 ```bash
 streamlit run app.py
 ```
 
-Windowsでは次でも起動できます。
-
-```powershell
-.\.venv\Scripts\python.exe -m streamlit run app.py
-```
+終了は起動したターミナルで`Ctrl+C`です。
 
 ## テスト
 
@@ -113,26 +154,42 @@ pytest
 ruff check .
 ```
 
-## 直近の予定
-
-1. 同一ステム・同一区間でpYINとBasic Pitchを比較
-2. 音程漏れ、余分な倍音、オクターブ誤り、細切れを集計
-3. 良い候補を統合するClean MIDI処理
-4. 体感テンポへ量子化し、編集可能なScore JSONへ変換
-5. TAB／楽譜編集MVP
-6. MusicXML・PDF出力
-
-以降の計画と完了条件は[開発ロードマップ](docs/ROADMAP.md)を参照してください。
-
 ## データ管理
 
-音源や生成物はGitへコミットしません。ローカルでは次のような構成を推奨します。
+音源、ステム、生成MIDI、Score JSONなどの制作データはGitへコミットしません。
 
 ```text
 workspace/
 ├─ input/
 │  └─ song-name/
-│     ├─ fixed/
-│     └─ follow/
+│     ├─ audio/
+│     ├─ stems/
+│     └─ midi/
+├─ project/
+│  └─ song-name/
+│     ├─ tempo.json
+│     ├─ performance.json
+│     └─ score.json
 └─ output/
+   └─ song-name/
+      ├─ clean.mid
+      └─ score.musicxml
 ```
+
+## 最終的に目指す操作
+
+```text
+Sunoで良い曲ができる
+  ↓
+音源、ステム、またはMIDIを追加する
+  ↓
+「楽譜を生成」を押す
+  ↓
+アプリ内で五線譜を確認する
+  ↓
+怪しい数小節だけ直す
+  ↓
+MusicXMLをMuseScoreまたはFlatへ渡す
+```
+
+目標は、**Suno曲を楽譜として残したい人が、専門的な採譜作業を最小限にできること**です。
