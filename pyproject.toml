@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stem-to-midi"
 version = "0.1.0"
-description = "Local tempo analysis lab for preparing separated audio stems for MIDI transcription"
+description = "Local workflow for turning Suno songs and MIDI into readable sheet music"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
   "numpy>=1.26,<3",
   "soundfile>=0.13,<1",
   "streamlit>=1.51,<2",
+  "verovio>=6.2,<7",
 ]
 
 [project.optional-dependencies]
