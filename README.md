@@ -63,6 +63,21 @@ UIでは「原音忠実 ↔ 読みやすい」のスライダーとして調整�
 
 ## 現在実装済み
 
+### Score Lab — Phase 1
+
+- 外部Standard MIDI Fileの読み込み
+- MIDI Type、PPQ、テンポ、拍子、トラック、チャンネル、音域の表示
+- 楽譜化するトラックの選択
+- 最高音、最低音、強さ、長さによる単旋律抽出
+- 四分、八分、16分グリッドへの基本クオンタイズ
+- 4/4小節への配置
+- 休符、付点音符、小節をまたぐタイの生成
+- MusicXML出力
+- Verovioによるアプリ内五線譜プレビュー
+- ページ切り替えと表示倍率調整
+
+Phase 1は固定テンポ、4/4、単旋律1パートに限定しています。Score JSON、原音同期、候補比較、手動編集は次のPhaseで追加します。
+
 ### Tempo Lab
 
 - WAV読み込み
@@ -91,18 +106,26 @@ UIでは「原音忠実 ↔ 読みやすい」のスライダーとして調整�
 
 現在のTempo Lab、Raw MIDI Lab、Accuracy Labは、今後は主に時間軸と転写候補を確認する診断機能として使います。
 
+## Score Labの使い方
+
+1. 左メニューから **Score Lab** を開く
+2. Basic Pitch、OpenMusic、DAWなどで作った`.mid`または`.midi`を選ぶ
+3. 楽譜化するトラックを選ぶ
+4. 最大細分、単旋律抽出方法、テンポ、音部記号を調整する
+5. 五線譜を確認し、MusicXMLをダウンロードする
+6. 必要に応じてMuseScoreまたはFlatで仕上げる
+
+MIDIに複数テンポや変拍子が含まれる場合、Phase 1では最初のテンポと4/4を使用し、画面に警告を表示します。
+
 ## 次に実装するもの
 
-1. 外部MIDIのインポート
-2. MIDIを共通Performance Notesへ変換
-3. Score JSON Version 1
-4. 最大16分までの基本クオンタイズ
-5. 休符とタイの生成
-6. MusicXML出力
-7. Verovioによるアプリ内五線譜プレビュー
-8. 読みやすさスライダーと問題小節の候補比較
-
-最初のMVPは、固定テンポ、4/4、単旋律1パートに限定します。
+1. MIDIを正式なPerformance Notesへ保存
+2. Score JSON Version 1
+3. Score JSONから同じMusicXMLとClean MIDIを再生成
+4. 短い隙間、細切れ音、過剰なタイを整理するReadability Quantizer
+5. 「原音忠実 ↔ 読みやすい」スライダー
+6. 問題小節の候補比較
+7. 原音との同期再生と簡易修正
 
 ## セットアップ
 
@@ -121,6 +144,8 @@ Accuracy Labも使う場合:
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,accuracy]"
 ```
+
+既存環境を更新した後も、Verovioなどの追加依存を反映するために同じインストールコマンドを再実行してください。
 
 ### macOS / Linux
 
