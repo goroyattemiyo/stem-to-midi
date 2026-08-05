@@ -414,7 +414,7 @@ def _load_midi(midi_bytes: bytes) -> mido.MidiFile:
 
 
 def _round_to_step(value: float, step: int) -> int:
-    return int(math.floor((value / step) + 0.5)) * step
+    return math.floor((value / step) + 0.5) * step
 
 
 def _choose_candidate(candidates: list[ScoreNote], strategy: str) -> ScoreNote:
